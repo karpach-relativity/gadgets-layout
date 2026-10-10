@@ -17,12 +17,35 @@ $log      = Join-Path $dir 'GadgetLayout.log'
 $ini      = Join-Path $env:LOCALAPPDATA 'Microsoft\Windows Sidebar\Settings.ini'
 $sidebar  = 'C:\Program Files\Windows Sidebar\sidebar.exe'
 
-Add-Type -AssemblyName System.Windows.Forms
+Add-Type -AssemblyName System.Windows.Forms, System.Drawing
 Add-Type @'
-using System; using System.Runtime.InteropServices;
-public static class DpiAware { [DllImport("user32.dll")] public static extern bool SetProcessDpiAwarenessContext(IntPtr c); }
+using System; using System.Text; using System.Collections.Generic; using System.Runtime.InteropServices;
+public static class GadgetWin32 {
+    [DllImport("user32.dll")] public static extern bool SetProcessDpiAwarenessContext(IntPtr c);
+    [DllImport("user32.dll")] public static extern IntPtr SetThreadDpiAwarenessContext(IntPtr c);
+    delegate bool EnumProc(IntPtr h, IntPtr l);
+    [DllImport("user32.dll")] static extern bool EnumWindows(EnumProc p, IntPtr l);
+    [DllImport("user32.dll")] static extern uint GetWindowThreadProcessId(IntPtr h, out uint pid);
+    [DllImport("user32.dll")] static extern bool IsWindowVisible(IntPtr h);
+    [DllImport("user32.dll", CharSet = CharSet.Unicode)] static extern int GetClassName(IntPtr h, StringBuilder s, int n);
+    [StructLayout(LayoutKind.Sequential)] struct RECT { public int L, T, R, B; }
+    [DllImport("user32.dll")] static extern bool GetWindowRect(IntPtr h, out RECT r);
+    // visible gadget frame windows ("BasicWindow") of the given processes as { x, y, width, height }
+    public static List<int[]> GadgetFrames(uint[] pids) {
+        var res = new List<int[]>(); var set = new HashSet<uint>(pids);
+        EnumWindows((h, l) => {
+            uint pid; GetWindowThreadProcessId(h, out pid);
+            var cls = new StringBuilder(64); RECT r;
+            if (set.Contains(pid) && IsWindowVisible(h) && GetClassName(h, cls, 64) > 0 && cls.ToString() == "BasicWindow" && GetWindowRect(h, out r))
+                res.Add(new[] { r.L, r.T, r.R - r.L, r.B - r.T });
+            return true; }, IntPtr.Zero);
+        return res;
+    }
+}
 '@
-[void][DpiAware]::SetProcessDpiAwarenessContext([IntPtr](-4))   # physical pixels, so signatures don't depend on scaling quirks
+# physical pixels, same units as Settings.ini; the thread call also works when the host process already has an awareness set
+[void][GadgetWin32]::SetProcessDpiAwarenessContext([IntPtr](-4))
+[void][GadgetWin32]::SetThreadDpiAwarenessContext([IntPtr](-4))
 
 function Write-Log($m) { Add-Content -LiteralPath $log -Value ("{0:s} {1}" -f (Get-Date), $m) }
 
@@ -58,6 +81,32 @@ function Get-GadgetEntries($lines) {
         elseif ($cur -and $l -match '^PrivateSetting_GadgetDropLocationY="(-?\d+)"') { $cur.YLine = $i; $cur.Y = [int]$Matches[1] }
     }
     $entries | Where-Object { $_.XLine -ge 0 -and $_.YLine -ge 0 }
+}
+
+# On start the sidebar pulls a gadget that overlaps a monitor edge fully into the work area of the monitor holding most
+# of it, without updating Settings.ini. Do the same here so a saved position is exactly where the gadget will appear.
+function Get-ClampedPosition($x, $y, $w, $h) {
+    $rect = New-Object System.Drawing.Rectangle $x, $y, $w, $h
+    $best = $null; $bestArea = 0
+    foreach ($s in [System.Windows.Forms.Screen]::AllScreens) {
+        $i = [System.Drawing.Rectangle]::Intersect($s.Bounds, $rect)
+        if ($i.Width * $i.Height -gt $bestArea) { $bestArea = $i.Width * $i.Height; $best = $s.WorkingArea }
+    }
+    if (-not $best) { return $x, $y }   # entirely off-screen: leave it to the sidebar
+    [Math]::Max($best.Left, [Math]::Min($x, $best.Right - $w)), [Math]::Max($best.Top, [Math]::Min($y, $best.Bottom - $h))
+}
+
+# Gadget entries with X/Y replaced by the on-screen position of the matching live gadget window (nearest one), clamped.
+function Get-LivePositions($entries) {
+    $pids = @(Get-Process sidebar -ErrorAction SilentlyContinue | ForEach-Object { [uint32]$_.Id })
+    $frames = New-Object System.Collections.ArrayList
+    if ($pids) { $frames.AddRange([GadgetWin32]::GadgetFrames($pids)) }
+    foreach ($e in $entries) {
+        $f = $frames | Sort-Object { [Math]::Abs($_[0] - $e.X) + [Math]::Abs($_[1] - $e.Y) } | Select-Object -First 1
+        if ($f) { $frames.Remove($f); $e.X, $e.Y = Get-ClampedPosition $f[0] $f[1] $f[2] $f[3] }
+        else { Write-Warning "no window for $($e.Key), saving its Settings.ini position" }
+        $e
+    }
 }
 
 function Load-Profiles {
@@ -111,7 +160,7 @@ if ($List) {
 }
 
 if ($Save) {
-    $entries = Get-GadgetEntries (Read-Ini)
+    $entries = @(Get-LivePositions @(Get-GadgetEntries (Read-Ini)))
     $all = Load-Profiles
     $obj = [ordered]@{}; $all.PSObject.Properties | ForEach-Object { $obj[$_.Name] = $_.Value }
     # one layout per signature: drop any other profile registered for this exact monitor layout

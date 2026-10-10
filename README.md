@@ -8,6 +8,7 @@ Sidebar gadget positions are stored as absolute coordinates, so they end up in t
 
 - **Monitor signature** – the current monitor layout is described by the size and position of every screen, e.g. `1920x1080@-1920,487 | 5120x2160@0,0`. The script runs DPI-aware, so signatures use physical pixels.
 - **Profiles** – `profiles.json` maps a profile name to a signature plus the X/Y position of each gadget (keyed as `<gadget file>#<instance>`, e.g. `myweather.gadget#1`).
+- **Save** – positions are taken from the live gadget windows rather than `Settings.ini`, because on start the sidebar silently pulls any gadget overlapping a monitor edge fully onto the monitor holding most of it, without updating `Settings.ini`. Saved positions get the same adjustment, so a gadget reappears exactly where it was saved.
 - **Apply** – the script closes the sidebar, rewrites the gadget drop-location values in `%LOCALAPPDATA%\Microsoft\Windows Sidebar\Settings.ini` (backing it up to `Settings.ini.bak-layout`), then restarts `sidebar.exe`.
 - **Watch** – polls every 10 seconds and re-applies once a new layout has been stable for two polls, so transient states while docking are ignored.
 
