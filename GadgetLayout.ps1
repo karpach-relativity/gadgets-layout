@@ -161,6 +161,10 @@ if ($List) {
 
 if ($Save) {
     $entries = @(Get-LivePositions @(Get-GadgetEntries (Read-Ini)))
+    # every gadget at 0,0 means the sidebar is stacked in the corner (bad apply/crash); saving that would poison the profile
+    if (@($entries).Count -gt 1 -and -not @($entries | Where-Object { $_.X -ne 0 -or $_.Y -ne 0 }) -and -not $Force) {
+        Write-Error "All gadgets are at 0,0 (stacked in the corner); not saving. Move them first, or use -Force."; return
+    }
     $all = Load-Profiles
     $obj = [ordered]@{}; $all.PSObject.Properties | ForEach-Object { $obj[$_.Name] = $_.Value }
     # one layout per signature: drop any other profile registered for this exact monitor layout
